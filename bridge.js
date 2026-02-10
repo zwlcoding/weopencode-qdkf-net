@@ -393,14 +393,40 @@ app.post('/webhook', async (req, res) => {
     console.log(`\n📩 收到消息 - 用户: ${userId}`);
     console.log(`💬 内容: ${content?.substring(0, 100)}${content?.length > 100 ? '...' : ''}`);
     
+    // 企业微信要求 5 秒内响应，设置 4.5 秒超时
+    const TIMEOUT_MS = 4500;
+    
     // 获取或创建用户 Session
     const sessionId = await getOrCreateSession(userId);
     
-    // 发送消息到 OpenCode
-    const responseText = await sendToOpenCode(sessionId, content || '');
+    // 发送消息到 OpenCode，带超时处理
+    const responsePromise = sendToOpenCode(sessionId, content || '');
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('TIMEOUT')), TIMEOUT_MS)
+    );
     
-    console.log(`🤖 AI 响应: ${responseText.substring(0, 100)}...`);
-    console.log(`⏱️ 处理耗时: ${Date.now() - startTime}ms`);
+    let responseText;
+    try {
+      responseText = await Promise.race([responsePromise, timeoutPromise]);
+      console.log(`🤖 AI 响应: ${responseText.substring(0, 100)}...`);
+    } catch (error) {
+      if (error.message === 'TIMEOUT') {
+        console.log(`⏱️ 处理超时 (>4.5s)，发送提示消息`);
+        responseText = '正在思考中，请稍等...\n\n(由于响应时间较长，请稍后再次发送消息查看结果)';
+        
+        // 在后台继续处理，缓存结果供下次查询
+        sendToOpenCode(sessionId, content || '').then(result => {
+          console.log(`✅ 后台处理完成: ${result.substring(0, 100)}...`);
+          // TODO: 可以在这里缓存结果，实现"轮询"机制
+        }).catch(err => {
+          console.error(`❌ 后台处理失败:`, err.message);
+        });
+      } else {
+        throw error;
+      }
+    }
+    
+    console.log(`⏱️ 总耗时: ${Date.now() - startTime}ms`);
     
     // 构建回复
     if (encryptMode) {
