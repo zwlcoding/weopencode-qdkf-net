@@ -185,12 +185,24 @@ function buildReplyXml(msg, content) {
  * 用于企业微信保存配置时验证服务器
  */
 app.get('/webhook', (req, res) => {
-  const { msg_signature, timestamp, nonce, echostr } = req.query;
+  // 企业微信明文模式使用 signature，加密模式使用 msg_signature
+  const signature = req.query.signature || req.query.msg_signature;
+  const { timestamp, nonce, echostr } = req.query;
   
   console.log('📨 收到企业微信验证请求');
+  console.log('   Query:', req.query);
   
-  if (!verifySignature(CONFIG.token, msg_signature, timestamp, nonce)) {
+  if (!signature || !timestamp || !nonce || !echostr) {
+    console.error('❌ 缺少必要参数');
+    return res.status(400).send('Missing parameters');
+  }
+  
+  if (!verifySignature(CONFIG.token, signature, timestamp, nonce)) {
     console.error('❌ 签名验证失败');
+    console.error('   Token:', CONFIG.token);
+    console.error('   Signature:', signature);
+    console.error('   Timestamp:', timestamp);
+    console.error('   Nonce:', nonce);
     return res.status(403).send('Invalid signature');
   }
   
@@ -206,6 +218,20 @@ app.post('/webhook', async (req, res) => {
   const startTime = Date.now();
   
   try {
+    // 验证签名（明文模式使用 signature，加密模式使用 msg_signature）
+    const signature = req.query.signature || req.query.msg_signature;
+    const { timestamp, nonce } = req.query;
+    
+    if (!signature || !timestamp || !nonce) {
+      console.error('❌ POST 请求缺少签名参数');
+      return res.status(400).send('Missing signature parameters');
+    }
+    
+    if (!verifySignature(CONFIG.token, signature, timestamp, nonce)) {
+      console.error('❌ POST 签名验证失败');
+      return res.status(403).send('Invalid signature');
+    }
+    
     const xml = req.body.toString();
     const msg = parseXml(xml);
     
