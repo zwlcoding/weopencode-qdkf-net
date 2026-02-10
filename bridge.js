@@ -429,6 +429,7 @@ app.post('/webhook', async (req, res) => {
     console.log(`⏱️ 总耗时: ${Date.now() - startTime}ms`);
     
     // 构建回复
+    let replyXml;
     if (encryptMode) {
       // 加密模式：构建加密回复
       const timestamp = Math.floor(Date.now() / 1000);
@@ -445,19 +446,21 @@ app.post('/webhook', async (req, res) => {
         .update([CONFIG.token, timestamp, nonce, encryptedReply].sort().join(''))
         .digest('hex');
       
-      const replyXml = `<xml>
+      replyXml = `<xml>
 <Encrypt><![CDATA[${encryptedReply}]]></Encrypt>
 <MsgSignature><![CDATA[${replySignature}]]></MsgSignature>
 <TimeStamp>${timestamp}</TimeStamp>
 <Nonce><![CDATA[${nonce}]]></Nonce>
 </xml>`;
-      
-      res.send(replyXml);
     } else {
       // 明文模式：直接返回
-      const replyXml = buildReplyXml(msg, responseText);
-      res.send(replyXml);
+      replyXml = buildReplyXml(msg, responseText);
     }
+    
+    console.log(`📤 发送响应 (${encryptMode ? '加密' : '明文'}模式)`);
+    console.log(`📄 响应内容: ${responseText.substring(0, 50)}...`);
+    res.send(replyXml);
+    console.log(`✅ 响应已发送`);
     
   } catch (error) {
     console.error('❌ 处理消息失败:', error.message);
