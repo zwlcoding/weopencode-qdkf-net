@@ -521,10 +521,15 @@ app.post('/webhook', async (req, res) => {
       responseText = await getModelsList();
     }
     else if (trimmedContent.startsWith('使用模型') || trimmedContent.startsWith('/model')) {
-      // 解析模型名称
-      const parts = trimmedContent.split(/\s+/);
-      if (parts.length >= 2) {
-        const modelPath = parts[1];
+      // 解析模型名称（支持带空格和不带空格格式）
+      let modelPath;
+      if (trimmedContent.startsWith('使用模型')) {
+        modelPath = trimmedContent.substring(4).trim(); // 去掉"使用模型"
+      } else if (trimmedContent.startsWith('/model')) {
+        modelPath = trimmedContent.substring(6).trim(); // 去掉"/model"
+      }
+      
+      if (modelPath) {
         console.log(`🔄 用户切换模型: ${modelPath}`);
         responseText = await switchModel(modelPath);
       } else {
