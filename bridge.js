@@ -221,14 +221,15 @@ const userModels = new Map();
  */
 async function getModelsList() {
   try {
-    const result = await opencodeRequest('/config/providers', {
+    // 使用 /provider 获取所有提供商和模型
+    const result = await opencodeRequest('/provider', {
       method: 'GET'
     });
     
     let output = '🤖 可用模型列表：\n\n';
     
     // 显示默认模型
-    if (result.default) {
+    if (result.default && Object.keys(result.default).length > 0) {
       output += '【当前默认】\n';
       for (const [provider, model] of Object.entries(result.default)) {
         output += `• ${provider}: ${model}\n`;
@@ -237,9 +238,9 @@ async function getModelsList() {
     }
     
     // 显示所有提供商和模型
-    if (result.providers && result.providers.length > 0) {
+    if (result.all && result.all.length > 0) {
       output += '【所有模型】\n';
-      result.providers.forEach(provider => {
+      result.all.forEach(provider => {
         if (provider.models && provider.models.length > 0) {
           output += `\n${provider.name || provider.id}:\n`;
           provider.models.forEach(model => {
