@@ -5,8 +5,12 @@
   "main": "bridge.js",
   "type": "module",
   "scripts": {
-    "start": "node bridge.js",
+    "start": "pm2 start ecosystem.config.cjs",
+    "stop": "pm2 stop wechat-opencode-bridge",
+    "restart": "pm2 restart wechat-opencode-bridge",
     "dev": "node --watch bridge.js",
+    "logs": "pm2 logs wechat-opencode-bridge",
+    "status": "pm2 status",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
