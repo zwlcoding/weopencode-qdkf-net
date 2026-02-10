@@ -198,8 +198,7 @@ async function getOrCreateSession(userId) {
     const session = await opencodeRequest('/session', {
       method: 'POST',
       body: JSON.stringify({ 
-        title: `WeChat-${userId.substring(0, 8)}`,
-        description: `企业微信用户 ${userId} 的会话`
+        title: `WeChat-${userId.substring(0, 8)}`
       })
     });
     
@@ -220,15 +219,15 @@ async function getOrCreateSession(userId) {
  * @returns {Promise<string>} AI 响应文本
  */
 async function sendToOpenCode(sessionId, content) {
-  const result = await opencodeRequest(`/session/${sessionId}/prompt`, {
+  const result = await opencodeRequest(`/session/${sessionId}/message`, {
     method: 'POST',
     body: JSON.stringify({
       parts: [{ type: 'text', text: content }]
     })
   });
   
-  // 提取文本响应
-  const responseText = result.data?.parts
+  // 提取文本响应 - API 返回 { info: Message, parts: Part[] }
+  const responseText = result.parts
     ?.filter(p => p.type === 'text')
     ?.map(p => p.text)
     ?.join('\n') || '抱歉，未能获取到有效响应';
