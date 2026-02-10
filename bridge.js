@@ -315,8 +315,9 @@ app.get('/webhook', (req, res) => {
     try {
       // 解密 echostr
       const decrypted = decryptWechatMsg(CONFIG.encodingAESKey, echostr);
-      console.log('🔓 解密成功，返回明文');
-      return res.send(decrypted);
+      console.log('🔓 解密成功，返回明文:', decrypted.msg);
+      console.log('   CorpId:', decrypted.corpId);
+      return res.send(decrypted.msg);
     } catch (error) {
       console.error('❌ 解密失败:', error.message);
       return res.status(500).send('Decrypt failed');
