@@ -138,6 +138,12 @@ function validateConfig() {
 // 用户 Session 缓存（userId -> sessionId）
 const userSessions = new Map();
 
+// 缓存超时响应（userId -> { content: 原始消息, response: 响应内容, timestamp: 时间戳 }）
+const pendingResponses = new Map();
+
+// 缓存过期时间（10分钟）
+const CACHE_EXPIRY_MS = 10 * 60 * 1000;
+
 /**
  * 企业微信消息签名验证
  * @param {string} token - 配置的 Token
@@ -547,23 +553,56 @@ app.post('/webhook', async (req, res) => {
         setTimeout(() => reject(new Error('TIMEOUT')), TIMEOUT_MS)
       );
       
-      try {
-        responseText = await Promise.race([responsePromise, timeoutPromise]);
-        console.log(`🤖 AI 响应: ${responseText.substring(0, 100)}...`);
-      } catch (error) {
-        if (error.message === 'TIMEOUT') {
-          console.log(`⏱️ 处理超时 (>4.5s)，发送提示消息`);
-          responseText = '正在思考中，请稍等...\n\n(由于响应时间较长，请稍后再次发送消息查看结果)';
-          
-          // 在后台继续处理，缓存结果供下次查询
+      // 检查是否有缓存的响应
+      const cached = pendingResponses.get(userId);
+      if (cached && (Date.now() - cached.timestamp) < CACHE_EXPIRY_MS) {
+        console.log(`📦 发现缓存响应，优先返回`);
+        responseText = cached.response;
+        pendingResponses.delete(userId);
+        
+        // 如果用户发送了新消息，继续处理新消息
+        if (trimmedContent && trimmedContent !== cached.content) {
+          console.log(`🔄 用户发送了新消息，后台继续处理`);
           sendToOpenCode(sessionId, trimmedContent, userId).then(result => {
-            console.log(`✅ 后台处理完成: ${result.substring(0, 100)}...`);
-            // TODO: 可以在这里缓存结果，实现"轮询"机制
+            pendingResponses.set(userId, {
+              content: trimmedContent,
+              response: result,
+              timestamp: Date.now()
+            });
+            console.log(`✅ 新消息处理完成并已缓存`);
           }).catch(err => {
-            console.error(`❌ 后台处理失败:`, err.message);
+            console.error(`❌ 新消息处理失败:`, err.message);
           });
-        } else {
-          throw error;
+        }
+      } else {
+        try {
+          responseText = await Promise.race([responsePromise, timeoutPromise]);
+          console.log(`🤖 AI 响应: ${responseText.substring(0, 100)}...`);
+        } catch (error) {
+          if (error.message === 'TIMEOUT') {
+            console.log(`⏱️ 处理超时 (>4.5s)，发送提示消息`);
+            responseText = '⏱️ 处理超时\n\n由于企业微信限制，必须在5秒内响应。当前问题较复杂，AI需要更长时间思考。\n\n💡 请再次发送任意消息（如"1"或"继续"），我会返回处理结果。';
+            
+            // 在后台继续处理，缓存结果供下次查询
+            sendToOpenCode(sessionId, trimmedContent, userId).then(result => {
+              console.log(`✅ 后台处理完成: ${result.substring(0, 100)}...`);
+              pendingResponses.set(userId, {
+                content: trimmedContent,
+                response: result,
+                timestamp: Date.now()
+              });
+              console.log(`💾 响应已缓存，等待用户下次查询`);
+            }).catch(err => {
+              console.error(`❌ 后台处理失败:`, err.message);
+              pendingResponses.set(userId, {
+                content: trimmedContent,
+                response: '❌ 处理失败：' + err.message,
+                timestamp: Date.now()
+              });
+            });
+          } else {
+            throw error;
+          }
         }
       }
     }
