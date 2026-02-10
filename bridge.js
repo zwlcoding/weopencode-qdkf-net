@@ -212,18 +212,116 @@ async function getOrCreateSession(userId) {
   return sessionId;
 }
 
+// 用户当前选择的模型缓存
+const userModels = new Map();
+
+/**
+ * 获取可用模型列表
+ * @returns {Promise<string>} 格式化的模型列表
+ */
+async function getModelsList() {
+  try {
+    const result = await opencodeRequest('/config/providers', {
+      method: 'GET'
+    });
+    
+    let output = '🤖 可用模型列表：\n\n';
+    
+    // 显示默认模型
+    if (result.default) {
+      output += '【当前默认】\n';
+      for (const [provider, model] of Object.entries(result.default)) {
+        output += `• ${provider}: ${model}\n`;
+      }
+      output += '\n';
+    }
+    
+    // 显示所有提供商和模型
+    if (result.providers && result.providers.length > 0) {
+      output += '【所有模型】\n';
+      result.providers.forEach(provider => {
+        if (provider.models && provider.models.length > 0) {
+          output += `\n${provider.name || provider.id}:\n`;
+          provider.models.forEach(model => {
+            output += `  - ${model.id}${model.name ? ` (${model.name})` : ''}\n`;
+          });
+        }
+      });
+    }
+    
+    output += '\n💡 使用方法：发送 "使用模型 <provider>/<model>" 切换\n';
+    output += '例如：使用模型 openai/gpt-4o';
+    
+    return output;
+  } catch (error) {
+    console.error('❌ 获取模型列表失败:', error.message);
+    return '抱歉，获取模型列表失败：' + error.message;
+  }
+}
+
+/**
+ * 切换模型
+ * @param {string} modelPath - 模型路径，格式 "provider/model" 或 "model"
+ * @returns {Promise<string>} 切换结果
+ */
+async function switchModel(modelPath) {
+  try {
+    // 先获取当前配置
+    const config = await opencodeRequest('/config', {
+      method: 'GET'
+    });
+    
+    // 解析模型路径
+    let provider, modelId;
+    if (modelPath.includes('/')) {
+      [provider, modelId] = modelPath.split('/');
+    } else {
+      // 如果没有指定 provider，使用当前默认 provider
+      provider = Object.keys(config.providers || {})[0] || 'openai';
+      modelId = modelPath;
+    }
+    
+    // 构建新的 providers 配置
+    const providers = config.providers || {};
+    if (!providers[provider]) {
+      providers[provider] = {};
+    }
+    providers[provider].model = modelId;
+    
+    // 更新配置
+    await opencodeRequest('/config', {
+      method: 'PATCH',
+      body: JSON.stringify({ providers })
+    });
+    
+    return `✅ 已切换到模型：${provider}/${modelId}\n\n下次对话将使用新模型。`;
+  } catch (error) {
+    console.error('❌ 切换模型失败:', error.message);
+    return '❌ 切换模型失败：' + error.message + '\n\n请检查模型名称是否正确。';
+  }
+}
+
 /**
  * 发送消息到 OpenCode
  * @param {string} sessionId - Session ID
  * @param {string} content - 用户消息内容
+ * @param {string} userId - 用户ID（用于获取用户选择的模型）
  * @returns {Promise<string>} AI 响应文本
  */
-async function sendToOpenCode(sessionId, content) {
+async function sendToOpenCode(sessionId, content, userId) {
+  const body = {
+    parts: [{ type: 'text', text: content }]
+  };
+  
+  // 如果用户指定了模型，添加到请求中
+  const userModel = userModels.get(userId);
+  if (userModel) {
+    body.model = userModel;
+  }
+  
   const result = await opencodeRequest(`/session/${sessionId}/message`, {
     method: 'POST',
-    body: JSON.stringify({
-      parts: [{ type: 'text', text: content }]
-    })
+    body: JSON.stringify(body)
   });
   
   // 提取文本响应 - API 返回 { info: Message, parts: Part[] }
@@ -393,36 +491,79 @@ app.post('/webhook', async (req, res) => {
     console.log(`\n📩 收到消息 - 用户: ${userId}`);
     console.log(`💬 内容: ${content?.substring(0, 100)}${content?.length > 100 ? '...' : ''}`);
     
-    // 企业微信要求 5 秒内响应，设置 4.5 秒超时
-    const TIMEOUT_MS = 4500;
-    
-    // 获取或创建用户 Session
-    const sessionId = await getOrCreateSession(userId);
-    
-    // 发送消息到 OpenCode，带超时处理
-    const responsePromise = sendToOpenCode(sessionId, content || '');
-    const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('TIMEOUT')), TIMEOUT_MS)
-    );
-    
     let responseText;
-    try {
-      responseText = await Promise.race([responsePromise, timeoutPromise]);
-      console.log(`🤖 AI 响应: ${responseText.substring(0, 100)}...`);
-    } catch (error) {
-      if (error.message === 'TIMEOUT') {
-        console.log(`⏱️ 处理超时 (>4.5s)，发送提示消息`);
-        responseText = '正在思考中，请稍等...\n\n(由于响应时间较长，请稍后再次发送消息查看结果)';
-        
-        // 在后台继续处理，缓存结果供下次查询
-        sendToOpenCode(sessionId, content || '').then(result => {
-          console.log(`✅ 后台处理完成: ${result.substring(0, 100)}...`);
-          // TODO: 可以在这里缓存结果，实现"轮询"机制
-        }).catch(err => {
-          console.error(`❌ 后台处理失败:`, err.message);
-        });
+    const trimmedContent = (content || '').trim();
+    
+    // 检查是否是帮助命令
+    if (trimmedContent === '/help' || trimmedContent === '帮助') {
+      responseText = `🤖 OpenCode 助手命令列表：
+
+📋 模型管理：
+  模型列表 /models - 查看可用模型
+  当前模型 /current - 查看当前使用的模型
+  使用模型 <provider>/<model> - 切换到指定模型
+  例如：使用模型 openai/gpt-4o
+
+💬 其他：
+  直接发送消息 - 与 AI 对话
+  /help - 显示此帮助信息`;
+    }
+    // 检查是否是模型切换命令
+    else if (trimmedContent === '/models' || trimmedContent === '模型列表' || trimmedContent === '查看模型') {
+      console.log('📋 用户请求模型列表');
+      responseText = await getModelsList();
+    }
+    else if (trimmedContent.startsWith('使用模型') || trimmedContent.startsWith('/model')) {
+      // 解析模型名称
+      const parts = trimmedContent.split(/\s+/);
+      if (parts.length >= 2) {
+        const modelPath = parts[1];
+        console.log(`🔄 用户切换模型: ${modelPath}`);
+        responseText = await switchModel(modelPath);
       } else {
-        throw error;
+        responseText = '请指定模型名称，格式：使用模型 <provider>/<model>\n例如：使用模型 openai/gpt-4o';
+      }
+    }
+    else if (trimmedContent === '/current' || trimmedContent === '当前模型') {
+      // 获取当前模型
+      const currentModel = userModels.get(userId);
+      if (currentModel) {
+        responseText = `当前会话使用的模型：${currentModel}\n\n发送 "使用模型 <provider>/<model>" 可以切换模型。`;
+      } else {
+        responseText = '当前使用默认模型。\n\n发送 "模型列表" 查看可用模型，\n发送 "使用模型 <provider>/<model>" 切换到指定模型。';
+      }
+    }
+    else {
+      // 企业微信要求 5 秒内响应，设置 4.5 秒超时
+      const TIMEOUT_MS = 4500;
+      
+      // 获取或创建用户 Session
+      const sessionId = await getOrCreateSession(userId);
+      
+      // 发送消息到 OpenCode，带超时处理
+      const responsePromise = sendToOpenCode(sessionId, trimmedContent, userId);
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('TIMEOUT')), TIMEOUT_MS)
+      );
+      
+      try {
+        responseText = await Promise.race([responsePromise, timeoutPromise]);
+        console.log(`🤖 AI 响应: ${responseText.substring(0, 100)}...`);
+      } catch (error) {
+        if (error.message === 'TIMEOUT') {
+          console.log(`⏱️ 处理超时 (>4.5s)，发送提示消息`);
+          responseText = '正在思考中，请稍等...\n\n(由于响应时间较长，请稍后再次发送消息查看结果)';
+          
+          // 在后台继续处理，缓存结果供下次查询
+          sendToOpenCode(sessionId, trimmedContent, userId).then(result => {
+            console.log(`✅ 后台处理完成: ${result.substring(0, 100)}...`);
+            // TODO: 可以在这里缓存结果，实现"轮询"机制
+          }).catch(err => {
+            console.error(`❌ 后台处理失败:`, err.message);
+          });
+        } else {
+          throw error;
+        }
       }
     }
     
