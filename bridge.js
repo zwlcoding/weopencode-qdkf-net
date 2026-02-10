@@ -7,6 +7,101 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.raw({ type: 'text/xml' }));
 
+// ==================== 企业微信加解密工具 ====================
+
+/**
+ * 企业微信 AES 解密
+ * @param {string} encodingAESKey - 43位加密密钥
+ * @param {string} encryptedData - Base64编码的加密数据
+ * @returns {object} { msg: 解密后的消息, corpId: 企业ID }
+ */
+function decryptWechatMsg(encodingAESKey, encryptedData) {
+  try {
+    // EncodingAESKey 实际上是 Base64 编码的 AES 密钥
+    const aesKey = Buffer.from(encodingAESKey + '=', 'base64');
+    
+    // 解密
+    const encryptedBuffer = Buffer.from(encryptedData, 'base64');
+    const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, aesKey.slice(0, 16));
+    decipher.setAutoPadding(false);
+    
+    let decrypted = decipher.update(encryptedBuffer);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    
+    // 去除 PKCS7 填充
+    const pad = decrypted[decrypted.length - 1];
+    const content = decrypted.slice(0, decrypted.length - pad);
+    
+    // 企业微信加密格式: random(16字节) + msg_len(4字节网络字节序) + msg + corpId
+    const msgLen = content.readUInt32BE(16);
+    const msg = content.slice(20, 20 + msgLen).toString('utf8');
+    const corpId = content.slice(20 + msgLen).toString('utf8');
+    
+    return { msg, corpId };
+  } catch (error) {
+    console.error('❌ 解密失败:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * 企业微信 AES 加密
+ * @param {string} encodingAESKey - 43位加密密钥
+ * @param {string} corpId - 企业ID
+ * @param {string} message - 明文消息
+ * @returns {string} Base64编码的加密数据
+ */
+function encryptWechatMsg(encodingAESKey, corpId, message) {
+  try {
+    const aesKey = Buffer.from(encodingAESKey + '=', 'base64');
+    
+    // 生成16字节随机数
+    const randomBytes = crypto.randomBytes(16);
+    
+    // 消息长度（4字节网络字节序）
+    const msgLenBuffer = Buffer.alloc(4);
+    msgLenBuffer.writeUInt32BE(Buffer.byteLength(message, 'utf8'), 0);
+    
+    // 拼接: random + msg_len + msg + corpId
+    const msgBuffer = Buffer.from(message, 'utf8');
+    const corpIdBuffer = Buffer.from(corpId, 'utf8');
+    const content = Buffer.concat([randomBytes, msgLenBuffer, msgBuffer, corpIdBuffer]);
+    
+    // PKCS7 填充到 AES 块大小（32字节）
+    const blockSize = 32;
+    const padLen = blockSize - (content.length % blockSize);
+    const padBuffer = Buffer.alloc(padLen, padLen);
+    const paddedContent = Buffer.concat([content, padBuffer]);
+    
+    // 加密
+    const cipher = crypto.createCipheriv('aes-256-cbc', aesKey, aesKey.slice(0, 16));
+    cipher.setAutoPadding(false);
+    let encrypted = cipher.update(paddedContent);
+    encrypted = Buffer.concat([encrypted, cipher.final()]);
+    
+    return encrypted.toString('base64');
+  } catch (error) {
+    console.error('❌ 加密失败:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * 验证企业微信消息签名（加密模式）
+ * @param {string} token - Token
+ * @param {string} timestamp - 时间戳
+ * @param {string} nonce - 随机数
+ * @param {string} encryptedMsg - 加密消息
+ * @param {string} msgSignature - 消息签名
+ * @returns {boolean} 签名是否有效
+ */
+function verifyMsgSignature(token, timestamp, nonce, encryptedMsg, msgSignature) {
+  const arr = [token, timestamp, nonce, encryptedMsg].sort();
+  const str = arr.join('');
+  const hash = crypto.createHash('sha1').update(str).digest('hex');
+  return hash === msgSignature;
+}
+
 // 配置
 const CONFIG = {
   // 企业微信配置（从环境变量读取）
@@ -183,90 +278,166 @@ function buildReplyXml(msg, content) {
 /**
  * 企业微信回调验证（GET 请求）
  * 用于企业微信保存配置时验证服务器
+ * 支持明文模式和加密模式
  */
 app.get('/webhook', (req, res) => {
-  // 企业微信明文模式使用 signature，加密模式使用 msg_signature
-  const signature = req.query.signature || req.query.msg_signature;
-  const { timestamp, nonce, echostr } = req.query;
+  const { signature, msg_signature, timestamp, nonce, echostr } = req.query;
   
   console.log('📨 收到企业微信验证请求');
   console.log('   Query:', req.query);
   
-  if (!signature || !timestamp || !nonce || !echostr) {
+  // 检查必要参数
+  if (!timestamp || !nonce || !echostr) {
     console.error('❌ 缺少必要参数');
     return res.status(400).send('Missing parameters');
   }
   
-  if (!verifySignature(CONFIG.token, signature, timestamp, nonce)) {
-    console.error('❌ 签名验证失败');
-    console.error('   Token:', CONFIG.token);
-    console.error('   Signature:', signature);
-    console.error('   Timestamp:', timestamp);
-    console.error('   Nonce:', nonce);
-    return res.status(403).send('Invalid signature');
+  // 明文模式：使用 signature
+  if (signature) {
+    if (!verifySignature(CONFIG.token, signature, timestamp, nonce)) {
+      console.error('❌ 明文模式签名验证失败');
+      return res.status(403).send('Invalid signature');
+    }
+    console.log('✅ 明文模式签名验证通过');
+    return res.send(echostr);
   }
   
-  console.log('✅ 签名验证通过');
-  res.send(echostr);
+  // 加密模式：使用 msg_signature，需要解密 echostr
+  if (msg_signature) {
+    // 先验证消息签名
+    if (!verifyMsgSignature(CONFIG.token, timestamp, nonce, echostr, msg_signature)) {
+      console.error('❌ 加密模式消息签名验证失败');
+      return res.status(403).send('Invalid msg_signature');
+    }
+    
+    console.log('✅ 加密模式消息签名验证通过');
+    
+    try {
+      // 解密 echostr
+      const decrypted = decryptWechatMsg(CONFIG.encodingAESKey, echostr);
+      console.log('🔓 解密成功，返回明文');
+      return res.send(decrypted);
+    } catch (error) {
+      console.error('❌ 解密失败:', error.message);
+      return res.status(500).send('Decrypt failed');
+    }
+  }
+  
+  console.error('❌ 缺少签名参数');
+  return res.status(400).send('Missing signature');
 });
 
 /**
  * 接收企业微信消息（POST 请求）
  * 处理用户发送的消息并返回 OpenCode AI 响应
+ * 支持明文模式和加密模式
  */
 app.post('/webhook', async (req, res) => {
   const startTime = Date.now();
   
   try {
-    // 验证签名（明文模式使用 signature，加密模式使用 msg_signature）
-    const signature = req.query.signature || req.query.msg_signature;
-    const { timestamp, nonce } = req.query;
+    const { signature, msg_signature, timestamp, nonce } = req.query;
     
-    if (!signature || !timestamp || !nonce) {
-      console.error('❌ POST 请求缺少签名参数');
-      return res.status(400).send('Missing signature parameters');
-    }
-    
-    if (!verifySignature(CONFIG.token, signature, timestamp, nonce)) {
-      console.error('❌ POST 签名验证失败');
-      return res.status(403).send('Invalid signature');
+    if (!timestamp || !nonce) {
+      console.error('❌ POST 请求缺少时间戳或随机数');
+      return res.status(400).send('Missing parameters');
     }
     
     const xml = req.body.toString();
-    const msg = parseXml(xml);
+    res.type('application/xml');
     
-    const userId = msg.FromUserName;
-    const content = msg.Content;
+    let msg, userId, content, encryptMode = false;
+    
+    // 明文模式
+    if (signature) {
+      if (!verifySignature(CONFIG.token, signature, timestamp, nonce)) {
+        console.error('❌ 明文模式签名验证失败');
+        return res.status(403).send('Invalid signature');
+      }
+      
+      const parsedMsg = parseXml(xml);
+      msg = parsedMsg;
+      userId = parsedMsg.FromUserName;
+      content = parsedMsg.Content;
+    }
+    // 加密模式
+    else if (msg_signature) {
+      encryptMode = true;
+      const parsedMsg = parseXml(xml);
+      const encryptedData = parsedMsg.Encrypt;
+      
+      if (!encryptedData) {
+        console.error('❌ 加密模式缺少 Encrypt 字段');
+        return res.status(400).send('Missing Encrypt field');
+      }
+      
+      // 验证消息签名
+      if (!verifyMsgSignature(CONFIG.token, timestamp, nonce, encryptedData, msg_signature)) {
+        console.error('❌ 加密模式消息签名验证失败');
+        return res.status(403).send('Invalid msg_signature');
+      }
+      
+      // 解密消息
+      const decrypted = decryptWechatMsg(CONFIG.encodingAESKey, encryptedData);
+      msg = parseXml(decrypted.msg);
+      userId = msg.FromUserName;
+      content = msg.Content;
+      
+      console.log(`🔓 解密后消息: ${decrypted.msg.substring(0, 200)}`);
+    }
+    else {
+      console.error('❌ POST 请求缺少签名参数');
+      return res.status(400).send('Missing signature');
+    }
     
     console.log(`\n📩 收到消息 - 用户: ${userId}`);
-    console.log(`💬 内容: ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`);
-    
-    // 快速响应，避免企业微信超时
-    res.type('application/xml');
+    console.log(`💬 内容: ${content?.substring(0, 100)}${content?.length > 100 ? '...' : ''}`);
     
     // 获取或创建用户 Session
     const sessionId = await getOrCreateSession(userId);
     
     // 发送消息到 OpenCode
-    const responseText = await sendToOpenCode(sessionId, content);
+    const responseText = await sendToOpenCode(sessionId, content || '');
     
     console.log(`🤖 AI 响应: ${responseText.substring(0, 100)}...`);
     console.log(`⏱️ 处理耗时: ${Date.now() - startTime}ms`);
     
-    // 构建并返回 XML 回复
-    const replyXml = buildReplyXml(msg, responseText);
-    res.send(replyXml);
+    // 构建回复
+    if (encryptMode) {
+      // 加密模式：构建加密回复
+      const timestamp = Math.floor(Date.now() / 1000);
+      const replyMsg = `<xml>
+<ToUserName><![CDATA[${msg.FromUserName}]]></ToUserName>
+<FromUserName><![CDATA[${msg.ToUserName}]]></FromUserName>
+<CreateTime>${timestamp}</CreateTime>
+<MsgType><![CDATA[text]]></MsgType>
+<Content><![CDATA[${responseText.substring(0, 2048)}]]></Content>
+</xml>`;
+      
+      const encryptedReply = encryptWechatMsg(CONFIG.encodingAESKey, CONFIG.corpId, replyMsg);
+      const replySignature = crypto.createHash('sha1')
+        .update([CONFIG.token, timestamp, nonce, encryptedReply].sort().join(''))
+        .digest('hex');
+      
+      const replyXml = `<xml>
+<Encrypt><![CDATA[${encryptedReply}]]></Encrypt>
+<MsgSignature><![CDATA[${replySignature}]]></MsgSignature>
+<TimeStamp>${timestamp}</TimeStamp>
+<Nonce><![CDATA[${nonce}]]></Nonce>
+</xml>`;
+      
+      res.send(replyXml);
+    } else {
+      // 明文模式：直接返回
+      const replyXml = buildReplyXml(msg, responseText);
+      res.send(replyXml);
+    }
     
   } catch (error) {
     console.error('❌ 处理消息失败:', error.message);
     console.error(error.stack);
     
-    // 返回友好的错误消息
-    const errorXml = buildReplyXml(
-      parseXml(req.body.toString()),
-      '抱歉，处理消息时出现错误，请稍后重试。'
-    );
-    res.send(errorXml);
+    res.status(500).send('Internal Server Error');
   }
 });
 
