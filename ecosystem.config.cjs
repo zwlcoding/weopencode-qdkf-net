@@ -1,4 +1,4 @@
-# 从 .env 文件加载环境变量
+// 从 .env 文件加载环境变量
 const fs = require('fs');
 const path = require('path');
 
